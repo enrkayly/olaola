@@ -1,0 +1,394 @@
+    <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fan Page - New and Improved</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 20px;
+            background-color: #f8f9fa;
+        }
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+        }
+        .song-info {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .song-details {
+            margin-left: 15px;
+        }
+        .song-title {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .song-artist {
+            font-size: 18px;
+            color: #6c757d;
+            margin-bottom: 0;
+        }
+        .lyrics-display {
+            margin-top: 30px;
+            max-height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            background-color: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .current-lyric {
+            font-weight: bold;
+            color: #007bff;
+            font-size: 1.2em;
+        }
+        #playerDebug {
+            font-family: monospace;
+            font-size: 12px;
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            white-space: pre-wrap;
+        }
+        #audioControls {
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="connection-status">
+            <span id="connectionStatus" class="badge bg-secondary">Disconnected</span>
+        </div>
+        
+        <h1 class="mb-4">Fan Page - New and Improved</h1>
+        
+        <div id="noSongPlaying" class="text-center py-5">
+            <h3>Waiting for a song...</h3>
+            <p class="text-muted">The admin will start a song soon.</p>
+        </div>
+        
+        <div id="songPlayingContainer" style="display: none;">
+            <div class="song-info">
+                <div class="song-details">
+                    <p class="song-title" id="songTitle">Song Title</p>
+                    <p class="song-artist" id="songArtist">Artist</p>
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="currentTime" class="form-label">Current Time: <span id="currentTimeDisplay">0:00</span> / <span id="durationDisplay">0:00</span></label>
+                <div class="progress">
+                    <div id="progressBar" class="progress-bar" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
+            </div>
+            
+            <div id="audioControls">
+                <audio id="audioPlayer" controls style="width: 100%;"></audio>
+                <button id="forcePlayButton" class="btn btn-primary mt-2">Force Play</button>
+            </div>
+            
+            <div id="playerDebug" class="mt-3"></div>
+        </div>
+        
+        <div class="lyrics-display">
+            <h3>Lyrics</h3>
+            <div id="lyricsContent" class="mt-3"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stomp-websocket@2.3.4-next/lib/stomp.min.js"></script>
+    <script>
+        // Global variables
+        let stompClient = null;
+        let currentSong = null;
+        let audioPlayer = null;
+        let currentSecond = 0;
+        let songDuration = 0;
+        let lyricsTimings = [];
+        let isPlaying = false;
+        let lastUpdateTime = 0;
+        
+        // Connect to WebSocket
+        function connect() {
+            updateConnectionStatus(false, 'Connecting...');
+            
+            const socket = new SockJS('/ws');
+            stompClient = Stomp.over(socket);
+            
+            // Disable debug logging
+            stompClient.debug = null;
+            
+            stompClient.connect({}, function(frame) {
+                console.log('Connected: ' + frame);
+                updateConnectionStatus(true, 'Connected');
+                
+                // Subscribe to playback updates
+                stompClient.subscribe('/topic/playback', function(message) {
+                    const data = JSON.parse(message.body);
+                    console.log('Received WebSocket message:', data);
+                    handlePlaybackUpdate(data);
+                });
+            }, function(error) {
+                console.log('Error connecting to WebSocket: ' + error);
+                updateConnectionStatus(false, 'Disconnected');
+                setTimeout(connect, 5000); // Try to reconnect after 5 seconds
+            });
+        }
+        
+        // Update connection status indicator
+        function updateConnectionStatus(connected, text) {
+            const statusElement = document.getElementById('connectionStatus');
+            if (connected) {
+                statusElement.className = 'badge bg-success';
+            } else {
+                statusElement.className = 'badge bg-danger';
+            }
+            statusElement.textContent = text;
+        }
+        
+        // Handle playback updates from the server
+        function handlePlaybackUpdate(message) {
+            updateDebugInfo('Received update', message);
+            
+            // Check for both playing and isPlaying properties
+            const playingState = message.playing !== undefined ? message.playing : message.isPlaying;
+            
+            // Update current playback position
+            currentSecond = message.currentSecond || 0;
+            isPlaying = playingState;
+            
+            // Throttle updates to prevent excessive processing
+            const now = Date.now();
+            if (now - lastUpdateTime < 500) {
+                return; // Skip this update if it's too soon after the last one
+            }
+            lastUpdateTime = now;
+            
+            // Update current song info if it's a new song
+            if (!currentSong || currentSong.songId !== message.songId) {
+                currentSong = message;
+                songDuration = message.duration || 100; // Default to 100 if duration not provided
+                
+                // Update song info display
+                document.getElementById('songTitle').textContent = message.songTitle || 'Unknown Title';
+                document.getElementById('songArtist').textContent = message.artist || 'Unknown Artist';
+                
+                // Show song playing container
+                document.getElementById('noSongPlaying').style.display = 'none';
+                document.getElementById('songPlayingContainer').style.display = 'block';
+                
+                // Load the audio
+                loadAudio(message.url);
+                
+                // Try to load lyrics timings if available
+                fetchLyrics(message.songId);
+            }
+            
+            // Update the audio player
+            updateAudioPlayer();
+            
+            // Update UI
+            updateTimeDisplay();
+            updateLyricsDisplay();
+        }
+        
+        // Load audio with the given URL
+        function loadAudio(url) {
+            if (!url) {
+                updateDebugInfo('Error', 'No URL provided for audio');
+                return;
+            }
+            
+            try {
+                // Make sure the URL is absolute
+                const fullUrl = new URL(url, window.location.origin).href;
+                updateDebugInfo('Loading audio', fullUrl);
+                
+                audioPlayer.src = fullUrl;
+                audioPlayer.load();
+                
+                // CRITICAL FIX: Automatically play the song when it's first loaded
+                // regardless of the playing state from the server
+                setTimeout(() => {
+                    audioPlayer.play()
+                        .then(() => {
+                            updateDebugInfo('Auto-play success', 'Song started playing automatically');
+                        })
+                        .catch(error => {
+                            updateDebugInfo('Auto-play failed', error.message);
+                            // Show a message to the user that they need to interact with the page
+                            document.getElementById('playerDebug').innerHTML = 
+                                '<strong style="color:red">Click the Force Play button to start audio</strong><br>' + 
+                                document.getElementById('playerDebug').innerHTML;
+                        });
+                }, 1000); // Short delay to ensure audio is loaded
+                
+                // Add event listener for when metadata is loaded
+                audioPlayer.onloadedmetadata = function() {
+                    songDuration = audioPlayer.duration;
+                    updateTimeDisplay();
+                    updateDebugInfo('Audio metadata loaded', {
+                        duration: songDuration,
+                        src: audioPlayer.src
+                    });
+                };
+            } catch (error) {
+                updateDebugInfo('Error loading audio', error.message);
+            }
+        }
+        
+        // Update the audio player based on current state
+        function updateAudioPlayer() {
+            if (!audioPlayer) return;
+            
+            // Only sync time if significantly different
+            if (Math.abs(audioPlayer.currentTime - currentSecond) > 3) {
+                audioPlayer.currentTime = currentSecond;
+                updateDebugInfo('Synced time', currentSecond);
+            }
+            
+            // CRITICAL FIX: We're ignoring the playing state from the server
+            // because it's constantly sending 'playing: false'
+            // Instead, we'll let the user control playback manually
+            // or use the initial state only when loading a new song
+        }
+        
+        // Fetch lyrics for the current song
+        function fetchLyrics(songId) {
+            if (!songId) return;
+            
+            fetch(`/api/lyrics/${songId}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch lyrics');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data && data.timings) {
+                        lyricsTimings = JSON.parse(data.timings);
+                        updateLyricsDisplay();
+                        updateDebugInfo('Lyrics loaded', `${lyricsTimings.length} lines`);
+                    } else {
+                        document.getElementById('lyricsContent').innerHTML = '<p class="text-muted">No lyrics available for this song.</p>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching lyrics:', error);
+                    document.getElementById('lyricsContent').innerHTML = '<p class="text-muted">Error loading lyrics.</p>';
+                });
+        }
+        
+        // Update time display
+        function updateTimeDisplay() {
+            const minutes = Math.floor(currentSecond / 60);
+            const seconds = currentSecond % 60;
+            document.getElementById('currentTimeDisplay').textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            
+            const durationMinutes = Math.floor(songDuration / 60);
+            const durationSeconds = Math.floor(songDuration % 60);
+            document.getElementById('durationDisplay').textContent = `${durationMinutes}:${durationSeconds.toString().padStart(2, '0')}`;
+            
+            // Update progress bar
+            const progress = (currentSecond / songDuration) * 100;
+            document.getElementById('progressBar').style.width = `${progress}%`;
+            document.getElementById('progressBar').setAttribute('aria-valuenow', progress);
+        }
+        
+        // Update lyrics display based on current time
+        function updateLyricsDisplay() {
+            if (!lyricsTimings || lyricsTimings.length === 0) return;
+            
+            const lyricsDiv = document.getElementById('lyricsContent');
+            
+            // Find the current lyric based on time
+            let currentLyric = null;
+            for (let i = lyricsTimings.length - 1; i >= 0; i--) {
+                if (lyricsTimings[i].time <= currentSecond) {
+                    currentLyric = lyricsTimings[i];
+                    break;
+                }
+            }
+            
+            // Update the display
+            if (currentLyric) {
+                const allLyrics = lyricsTimings.map(timing => {
+                    if (timing === currentLyric) {
+                        return `<p class="current-lyric">${timing.text}</p>`;
+                    } else {
+                        return `<p>${timing.text}</p>`;
+                    }
+                }).join('');
+                
+                lyricsDiv.innerHTML = allLyrics;
+                
+                // Scroll to the current lyric
+                const currentLyricElement = lyricsDiv.querySelector('.current-lyric');
+                if (currentLyricElement) {
+                    currentLyricElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+        }
+        
+        // Update debug information
+        function updateDebugInfo(action, data) {
+            const debugElement = document.getElementById('playerDebug');
+            const timestamp = new Date().toLocaleTimeString();
+            
+            let debugText = `[${timestamp}] ${action}: `;
+            if (typeof data === 'object') {
+                debugText += JSON.stringify(data, null, 2);
+            } else {
+                debugText += data;
+            }
+            
+            // Add to debug log (keep only last 10 entries)
+            const currentLog = debugElement.innerHTML;
+            const logLines = currentLog.split('\n');
+            if (logLines.length > 10) {
+                logLines.shift(); // Remove oldest entry
+            }
+            logLines.push(debugText);
+            debugElement.innerHTML = logLines.join('\n');
+        }
+        
+        // Initialize the page
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initialize audio player
+            audioPlayer = document.getElementById('audioPlayer');
+            
+            // Add event listeners
+            audioPlayer.addEventListener('play', () => updateDebugInfo('Audio event', 'play'));
+            audioPlayer.addEventListener('pause', () => updateDebugInfo('Audio event', 'pause'));
+            audioPlayer.addEventListener('error', (e) => updateDebugInfo('Audio error', e.target.error.message || 'Unknown error'));
+            
+            // Add force play button event listener
+            document.getElementById('forcePlayButton').addEventListener('click', function() {
+                if (audioPlayer.src) {
+                    audioPlayer.play()
+                        .then(() => updateDebugInfo('Manual play', 'Success'))
+                        .catch(error => updateDebugInfo('Manual play error', error.message));
+                } else {
+                    updateDebugInfo('Manual play error', 'No audio source set');
+                }
+            });
+            
+            // Connect to WebSocket
+            connect();
+            
+            // Initial debug info
+            updateDebugInfo('Page loaded', 'Waiting for song...');
+        });
+    </script>
+</body>
+</html>
